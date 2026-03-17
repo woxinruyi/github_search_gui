@@ -1,0 +1,10 @@
+# Git Auto Push 项目依赖
+# ========================
+# 
+# 安装方式:
+#   pip install -r requirements.txt -t libs
+#
+# 或使用 install_deps.py 脚本自动安装
+
+# 可选依赖 - 用于自动化浏览器获取 Token
+playwright>=1.40.0

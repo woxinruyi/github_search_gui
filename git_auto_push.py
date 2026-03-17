@@ -222,6 +222,19 @@ import json        # 用于配置文件读写
 from datetime import datetime  # 用于生成时间戳
 from urllib.parse import urlparse, urlunparse  # 用于 URL 解析和构建
 
+# ==============================================================================
+# 本地依赖路径配置
+# ==============================================================================
+# 将 libs 文件夹添加到 Python 模块搜索路径
+# 这样可以优先使用本地安装的依赖，实现项目依赖的本地化管理
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LIBS_DIR = os.path.join(SCRIPT_DIR, 'libs')
+
+# 如果 libs 文件夹存在，将其添加到 sys.path 的最前面
+if os.path.exists(LIBS_DIR):
+    if LIBS_DIR not in sys.path:
+        sys.path.insert(0, LIBS_DIR)
+
 
 # ==============================================================================
 # Token 配置文件路径
@@ -340,13 +353,21 @@ def get_remote_url_with_token(repo_path, token, username=None):
         print(f"⚠️ 不支持的 URL 格式: {original_url}")
         return None
     
+    # 先清理 netloc 中可能存在的认证信息，避免重复添加
+    # 例如: user:token@github.com -> github.com
+    if '@' in parsed.netloc:
+        # 移除现有的认证信息
+        host = parsed.netloc.split('@')[-1]
+    else:
+        host = parsed.netloc
+    
     # 构建带 Token 的 URL
     if username:
         # 格式: https://username:token@github.com/user/repo.git
-        netloc = f"{username}:{token}@{parsed.netloc}"
+        netloc = f"{username}:{token}@{host}"
     else:
         # 格式: https://token@github.com/user/repo.git
-        netloc = f"{token}@{parsed.netloc}"
+        netloc = f"{token}@{host}"
     
     # 重新构建 URL
     new_url = urlunparse((
@@ -427,6 +448,219 @@ def restore_remote_url(repo_path):
         return success
     
     return True
+
+
+# ==============================================================================
+# Token 自动获取函数
+# ==============================================================================
+
+def prompt_get_token():
+    """
+    提示用户获取 GitHub Token
+    
+    提供两种获取方式：
+        1. 自动获取（使用 Playwright 自动化浏览器）
+        2. 手动获取（打开浏览器，用户手动操作）
+    
+    返回:
+        tuple: (success, token, username)
+            - success (bool): 是否成功获取 Token
+            - token (str): GitHub Personal Access Token
+            - username (str): GitHub 用户名
+    """
+    import webbrowser
+    
+    print("\n" + "=" * 60)
+    print("🔑 GitHub Token 获取向导")
+    print("=" * 60)
+    print("\n请选择获取 Token 的方式：")
+    print("  1. 自动获取 (使用浏览器自动化，需要 Playwright)")
+    print("  2. 手动获取 (打开浏览器，手动操作后粘贴 Token)")
+    print("  3. 跳过 (稍后手动配置)")
+    print()
+    
+    choice = input("请输入选项 (1/2/3): ").strip()
+    
+    if choice == '1':
+        return auto_get_token_with_browser()
+    elif choice == '2':
+        return manual_get_token()
+    else:
+        print("\n💡 您可以稍后使用以下命令配置 Token：")
+        print("   python git_auto_push.py -t <your_token> -u <username> --save-token")
+        return False, None, None
+
+
+def auto_get_token_with_browser():
+    """
+    使用 Playwright 自动化浏览器获取 Token
+    
+    流程:
+        1. 检查并安装 Playwright
+        2. 打开浏览器到 GitHub 登录页
+        3. 等待用户登录
+        4. 跳转到 Token 创建页面
+        5. 自动填写信息并生成 Token
+        6. 获取并保存 Token
+    
+    返回:
+        tuple: (success, token, username)
+    """
+    # 检查 Playwright 是否安装
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("\n⚠️ Playwright 未安装")
+        user_input = input("是否自动安装 Playwright? (y/n): ").strip().lower()
+        if user_input == 'y':
+            print("📦 正在安装 Playwright...")
+            try:
+                import subprocess as sp
+                sp.run([sys.executable, "-m", "pip", "install", "playwright"], check=True)
+                sp.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                print("✅ Playwright 安装成功")
+                from playwright.sync_api import sync_playwright
+            except Exception as e:
+                print(f"❌ 安装失败: {e}")
+                print("   请尝试手动获取方式")
+                return manual_get_token()
+        else:
+            return manual_get_token()
+    
+    import time
+    
+    print("\n🌐 正在启动浏览器...")
+    print("📝 请在浏览器中完成 GitHub 登录")
+    print("   登录后将自动跳转到 Token 创建页面\n")
+    
+    token = None
+    username = None
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context()
+            page = context.new_page()
+            
+            # 跳转到 GitHub 登录页
+            print("🔗 正在打开 GitHub 登录页面...")
+            page.goto("https://github.com/login")
+            
+            # 等待用户登录
+            print("⏳ 等待用户登录... (最多等待 5 分钟)")
+            
+            max_wait = 300
+            start_time = time.time()
+            
+            while time.time() - start_time < max_wait:
+                current_url = page.url
+                if "github.com/login" not in current_url and "github.com" in current_url:
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                        user_menu = page.locator('[data-login]')
+                        if user_menu.count() > 0:
+                            username = user_menu.first.get_attribute('data-login')
+                            print(f"✅ 登录成功! 用户: {username}")
+                            break
+                    except:
+                        pass
+                    if "github.com/login" not in current_url:
+                        print("✅ 检测到登录成功")
+                        break
+                time.sleep(1)
+            else:
+                print("❌ 登录超时")
+                browser.close()
+                return False, None, None
+            
+            # 跳转到 Token 创建页面
+            print("\n🔗 正在跳转到 Token 创建页面...")
+            page.goto("https://github.com/settings/tokens/new")
+            page.wait_for_load_state("networkidle")
+            
+            # 填写 Token 信息
+            print("📝 正在填写 Token 信息...")
+            try:
+                page.fill('input[name="note"], #token_description', "git_auto_push_token")
+            except:
+                pass
+            
+            # 勾选 repo 权限
+            print("🔐 正在设置权限 (repo)...")
+            try:
+                repo_checkbox = page.locator('input[type="checkbox"][value="repo"]')
+                if repo_checkbox.count() > 0 and not repo_checkbox.first.is_checked():
+                    repo_checkbox.first.click()
+            except:
+                pass
+            
+            # 生成 Token
+            print("🔄 正在生成 Token...")
+            try:
+                page.click('button:has-text("Generate token")')
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+            except:
+                pass
+            
+            # 获取 Token
+            print("🔍 正在获取 Token...")
+            try:
+                token_element = page.locator('code')
+                for i in range(token_element.count()):
+                    text = token_element.nth(i).inner_text()
+                    if text.startswith('ghp_') or text.startswith('github_pat_'):
+                        token = text.strip()
+                        print(f"✅ Token 获取成功: {token[:15]}...")
+                        break
+            except:
+                pass
+            
+            browser.close()
+            
+            if token:
+                save_token(token, username)
+                return True, token, username
+            else:
+                print("❌ 未能自动获取 Token")
+                return manual_get_token()
+                
+    except Exception as e:
+        print(f"❌ 自动获取失败: {e}")
+        return manual_get_token()
+
+
+def manual_get_token():
+    """
+    手动获取 Token：打开浏览器让用户手动操作
+    
+    返回:
+        tuple: (success, token, username)
+    """
+    import webbrowser
+    
+    print("\n🌐 正在打开 GitHub Token 创建页面...")
+    print("   请在浏览器中完成以下操作：")
+    print("   1. 登录 GitHub 账号")
+    print("   2. 填写 Token 名称 (如: git_auto_push)")
+    print("   3. 选择过期时间")
+    print("   4. 勾选 'repo' 权限")
+    print("   5. 点击 'Generate token'")
+    print("   6. 复制生成的 Token\n")
+    
+    webbrowser.open("https://github.com/settings/tokens/new")
+    
+    print("=" * 60)
+    token = input("请粘贴您的 GitHub Token (ghp_xxx...): ").strip()
+    username = input("请输入您的 GitHub 用户名 (可选，直接回车跳过): ").strip()
+    print("=" * 60)
+    
+    if token and (token.startswith('ghp_') or token.startswith('github_pat_')):
+        save_token(token, username if username else None)
+        return True, token, username
+    else:
+        print("❌ Token 格式无效")
+        return False, None, None
 
 
 # ==============================================================================
@@ -830,6 +1064,18 @@ def auto_push(repo_path=None, commit_message=None, branch="master", force=False,
             if username is None:
                 username = saved_username
             print("🔑 使用已保存的 Token 进行认证")
+    
+    # 如果仍然没有 token，提示用户获取
+    if token is None:
+        print("\n⚠️ 未检测到 Token 配置")
+        print("   私有仓库或需要认证的推送可能会失败")
+        user_input = input("   是否现在获取 Token? (y/n): ").strip().lower()
+        if user_input == 'y':
+            # 尝试自动获取 Token
+            success, new_token, new_username = prompt_get_token()
+            if success:
+                token = new_token
+                username = new_username
     
     # 如果有 token，配置认证
     if token:
