@@ -559,7 +559,7 @@ def git_status(repo_path):
 # Git 操作函数
 # ==============================================================================
 
-def git_add_all(repo_path):
+def git_add_all(repo_path, exclude_token_config=True):
     """
     将所有更改添加到 Git 暂存区
     
@@ -568,6 +568,7 @@ def git_add_all(repo_path):
     
     参数:
         repo_path (str): Git 仓库的本地路径
+        exclude_token_config (bool): 是否排除 Token 配置文件，默认为 True
     
     返回:
         tuple: (success, message)
@@ -579,7 +580,14 @@ def git_add_all(repo_path):
         >>> if success:
         ...     print("所有更改已添加到暂存区")
     """
+    # 先添加所有文件
     success, stdout, stderr = run_git_command("git add -A", cwd=repo_path)
+    
+    # 如果需要排除 Token 配置文件，从暂存区移除
+    if success and exclude_token_config:
+        # 检查 Token 配置文件是否在暂存区
+        run_git_command("git reset HEAD -- .git_token_config.json", cwd=repo_path)
+    
     return success, stdout or stderr
 
 
